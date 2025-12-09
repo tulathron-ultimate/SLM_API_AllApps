@@ -14,14 +14,23 @@
       LicenseRequired, IsInstalled, IsBlacklisted, IsWhitelisted, IsVirtual, IsOEM,
       IsMSDN, IsWebApplication, ApplicationItemCost
 
-    "Last user" is approximated via MostRecentUser / MostFrequentUser on the computer,
-    not per-app. We can extend later to use application-user endpoints if you want.
+    "Last user" lookups are skipped by default to reduce API calls; enable with -IncludeUserLookups.
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
-    [string]$ConfigPath = "./SnowApiConfig.json"
+    [string]$ConfigPath = "./SnowApiConfig.json",
+
+    [Parameter(Mandatory = $false, HelpMessage = "Include inactive computers in the export.")]
+    [switch]$IncludeInactiveComputers,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Fetch MostRecent/MostFrequent users per computer (slower).")]
+    [switch]$IncludeUserLookups,
+
+    [Parameter(Mandatory = $false, HelpMessage = "How many rows to buffer before flushing to CSV (memory control).")]
+    [ValidateRange(1, [int]::MaxValue)]
+    [int]$FlushBatchSize = 1000
 )
 
 Set-StrictMode -Version Latest
@@ -217,21 +226,61 @@ Write-Host "Fetching computers from Snow..." -ForegroundColor Cyan
 # IMPORTANT: no trailing slash before the query; we let the API default to JSON
 $computers = Get-SnowCollection -Url "customers/$($config.CustomerId)/computers"
 
-if (-not $computers) {
+$filteredComputers =
+    if ($IncludeInactiveComputers) {
+        $computers
+    }
+    else {
+        $computers | Where-Object { $_.Body -and $_.Body.Status -eq 'Active' }
+    }
+
+if ($computers.Count -ne $filteredComputers.Count) {
+    Write-Host "Filtered out $($computers.Count - $filteredComputers.Count) non-active computers." -ForegroundColor Gray
+}
+
+Write-Host "Fetching application catalog from Snow for caching..." -ForegroundColor Cyan
+$applicationCache = @{}
+$allApplications  = Get-SnowCollection -Url "customers/$($config.CustomerId)/applications"
+foreach ($appResource in $allApplications) {
+    if ($appResource.Body -and $appResource.Body.Id) {
+        $applicationCache[$appResource.Body.Id] = $appResource.Body
+    }
+}
+Write-Host "Cached $($applicationCache.Count) applications for lookups." -ForegroundColor Gray
+
+if (-not $filteredComputers) {
     Write-Warning "No computers returned from Snow."
     return
 }
 
 $rows = New-Object System.Collections.Generic.List[object]
 
-foreach ($compResource in $computers) {
+# Reset CSV if it already exists so batch appends don't retain stale data
+if (Test-Path -LiteralPath $config.OutputCsvPath) {
+    Remove-Item -LiteralPath $config.OutputCsvPath
+}
+
+$csvInitialized = $false
+
+foreach ($compResource in $filteredComputers) {
     $comp = $compResource.Body
     if (-not $comp) { continue }
 
     Write-Host "Processing computer $($comp.Id) - $($comp.Name)..." -ForegroundColor Yellow
 
-    # Enrich with most recent / frequent user for the computer
-    $userSummary = Get-ComputerUserSummary -ComputerResource $compResource
+    $userSummary =
+        if ($IncludeUserLookups) {
+            Get-ComputerUserSummary -ComputerResource $compResource
+        }
+        else {
+            # Skipping user lookups to reduce API calls
+            [pscustomobject]@{
+                MostRecentUserId     = $null
+                MostRecentUserName   = $null
+                MostFrequentUserId   = $null
+                MostFrequentUserName = $null
+            }
+        }
 
     # Per-computer application usage
     $apps = Get-SnowCollection -Url "customers/$($config.CustomerId)/computers/$($comp.Id)/applications"
@@ -239,6 +288,8 @@ foreach ($compResource in $computers) {
     foreach ($appResource in $apps) {
         $app = $appResource.Body
         if (-not $app) { continue }
+
+        $appDetails = $applicationCache[$app.Id]
 
         $row = [pscustomobject]@{
             # Computer context
@@ -258,13 +309,13 @@ foreach ($compResource in $computers) {
 
             # Application identity
             ApplicationId                 = $app.Id
-            ApplicationName               = $app.Name
-            ApplicationManufacturerId     = $app.ManufacturerId
-            ApplicationManufacturer       = $app.ManufacturerName
-            ApplicationFamilyId           = $app.FamilyId
-            ApplicationFamilyName         = $app.FamilyName
-            BundleApplicationId           = $app.BundleApplicationId
-            BundleApplicationName         = $app.BundleApplicationName
+            ApplicationName               = if ($appDetails) { $appDetails.Name } else { $app.Name }
+            ApplicationManufacturerId     = if ($appDetails) { $appDetails.ManufacturerId } else { $app.ManufacturerId }
+            ApplicationManufacturer       = if ($appDetails) { $appDetails.ManufacturerName } else { $app.ManufacturerName }
+            ApplicationFamilyId           = if ($appDetails) { $appDetails.FamilyId } else { $app.FamilyId }
+            ApplicationFamilyName         = if ($appDetails) { $appDetails.FamilyName } else { $app.FamilyName }
+            BundleApplicationId           = if ($appDetails) { $appDetails.BundleApplicationId } else { $app.BundleApplicationId }
+            BundleApplicationName         = if ($appDetails) { $appDetails.BundleApplicationName } else { $app.BundleApplicationName }
 
             # Usage & lifecycle
             FirstUsed                     = $app.FirstUsed
@@ -288,11 +339,33 @@ foreach ($compResource in $computers) {
         }
 
         $rows.Add($row)
+
+        if ($rows.Count -ge $FlushBatchSize) {
+            $writeParams = @{ Path = $config.OutputCsvPath; NoTypeInformation = $true; Encoding = 'UTF8' }
+            if ($csvInitialized) {
+                $rows | Export-Csv @writeParams -Append
+            }
+            else {
+                $rows | Export-Csv @writeParams
+                $csvInitialized = $true
+            }
+
+            $rows.Clear()
+        }
     }
 }
 
-Write-Host "Writing $($rows.Count) rows to $($config.OutputCsvPath)..." -ForegroundColor Green
-$rows | Export-Csv -Path $config.OutputCsvPath -NoTypeInformation -Encoding UTF8
+if ($rows.Count -gt 0) {
+    $writeParams = @{ Path = $config.OutputCsvPath; NoTypeInformation = $true; Encoding = 'UTF8' }
+    if ($csvInitialized) {
+        $rows | Export-Csv @writeParams -Append
+    }
+    else {
+        $rows | Export-Csv @writeParams
+    }
+}
+
+Write-Host "Wrote output to $($config.OutputCsvPath)." -ForegroundColor Green
 
 Write-Host "Done." -ForegroundColor Green
 
