@@ -124,27 +124,6 @@ function Invoke-SnowGet {
     }
 }
 
-function Get-PropertyOrNull {
-    param(
-        [Parameter(Mandatory)]
-        [object]$Object,
-
-        [Parameter(Mandatory)]
-        [string]$PropertyName
-    )
-
-    if ($null -eq $Object) {
-        return $null
-    }
-
-    $prop = $Object.PSObject.Properties[$PropertyName]
-    if ($prop) {
-        return $prop.Value
-    }
-
-    return $null
-}
-
 # For collection resources that have Meta/Links/Body (Body = array of sub-resources)
 function Get-SnowCollection {
     [CmdletBinding()]
@@ -312,27 +291,6 @@ foreach ($compResource in $filteredComputers) {
 
         $appDetails = $applicationCache[$app.Id]
 
-        $applicationName = Get-PropertyOrNull -Object $appDetails -PropertyName 'Name'
-        if ($null -eq $applicationName) { $applicationName = Get-PropertyOrNull -Object $app -PropertyName 'Name' }
-
-        $manufacturerId = Get-PropertyOrNull -Object $appDetails -PropertyName 'ManufacturerId'
-        if ($null -eq $manufacturerId) { $manufacturerId = Get-PropertyOrNull -Object $app -PropertyName 'ManufacturerId' }
-
-        $manufacturerName = Get-PropertyOrNull -Object $appDetails -PropertyName 'ManufacturerName'
-        if ($null -eq $manufacturerName) { $manufacturerName = Get-PropertyOrNull -Object $app -PropertyName 'ManufacturerName' }
-
-        $familyId = Get-PropertyOrNull -Object $appDetails -PropertyName 'FamilyId'
-        if ($null -eq $familyId) { $familyId = Get-PropertyOrNull -Object $app -PropertyName 'FamilyId' }
-
-        $familyName = Get-PropertyOrNull -Object $appDetails -PropertyName 'FamilyName'
-        if ($null -eq $familyName) { $familyName = Get-PropertyOrNull -Object $app -PropertyName 'FamilyName' }
-
-        $bundleApplicationId = Get-PropertyOrNull -Object $app -PropertyName 'BundleApplicationId'
-        if ($null -eq $bundleApplicationId) { $bundleApplicationId = Get-PropertyOrNull -Object $appDetails -PropertyName 'BundleApplicationId' }
-
-        $bundleApplicationName = Get-PropertyOrNull -Object $app -PropertyName 'BundleApplicationName'
-        if ($null -eq $bundleApplicationName) { $bundleApplicationName = Get-PropertyOrNull -Object $appDetails -PropertyName 'BundleApplicationName' }
-
         $row = [pscustomobject]@{
             # Computer context
             ComputerId                    = $comp.Id
@@ -351,13 +309,13 @@ foreach ($compResource in $filteredComputers) {
 
             # Application identity
             ApplicationId                 = $app.Id
-            ApplicationName               = $applicationName
-            ApplicationManufacturerId     = $manufacturerId
-            ApplicationManufacturer       = $manufacturerName
-            ApplicationFamilyId           = $familyId
-            ApplicationFamilyName         = $familyName
-            BundleApplicationId           = $bundleApplicationId
-            BundleApplicationName         = $bundleApplicationName
+            ApplicationName               = if ($appDetails) { $appDetails.Name } else { $app.Name }
+            ApplicationManufacturerId     = if ($appDetails) { $appDetails.ManufacturerId } else { $app.ManufacturerId }
+            ApplicationManufacturer       = if ($appDetails) { $appDetails.ManufacturerName } else { $app.ManufacturerName }
+            ApplicationFamilyId           = if ($appDetails) { $appDetails.FamilyId } else { $app.FamilyId }
+            ApplicationFamilyName         = if ($appDetails) { $appDetails.FamilyName } else { $app.FamilyName }
+            BundleApplicationId           = if ($appDetails) { $appDetails.BundleApplicationId } else { $app.BundleApplicationId }
+            BundleApplicationName         = if ($appDetails) { $appDetails.BundleApplicationName } else { $app.BundleApplicationName }
 
             # Usage & lifecycle
             FirstUsed                     = $app.FirstUsed
